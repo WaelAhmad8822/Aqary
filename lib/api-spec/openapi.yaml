@@ -1,0 +1,1087 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: Aqary Real Estate Platform API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: auth
+    description: Authentication
+  - name: properties
+    description: Property listings
+  - name: recommendations
+    description: Smart recommendations
+  - name: interactions
+    description: User interaction tracking
+  - name: chat
+    description: AI Chatbot
+  - name: admin
+    description: Admin operations
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /auth/register:
+    post:
+      operationId: register
+      tags: [auth]
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterBody"
+      responses:
+        "201":
+          description: User registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginBody"
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Get current user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /properties/seller/activity:
+    get:
+      operationId: getSellerActivity
+      tags: [properties]
+      summary: Recent interactions on seller listings
+      responses:
+        "200":
+          description: Recent activity for current seller
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SellerActivityResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /properties:
+    get:
+      operationId: listProperties
+      tags: [properties]
+      summary: List all approved properties
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: location
+          in: query
+          schema:
+            type: string
+        - name: minPrice
+          in: query
+          schema:
+            type: number
+        - name: maxPrice
+          in: query
+          schema:
+            type: number
+      responses:
+        "200":
+          description: Property list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PropertyItem"
+    post:
+      operationId: createProperty
+      tags: [properties]
+      summary: Create property listing (seller)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePropertyBody"
+      responses:
+        "201":
+          description: Property created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PropertyItem"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /properties/{id}:
+    get:
+      operationId: getProperty
+      tags: [properties]
+      summary: Get property by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Property detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PropertyItem"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: updateProperty
+      tags: [properties]
+      summary: Update property (seller)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePropertyBody"
+      responses:
+        "200":
+          description: Property updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PropertyItem"
+    delete:
+      operationId: deleteProperty
+      tags: [properties]
+      summary: Delete property (seller)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /properties/my:
+    get:
+      operationId: getMyProperties
+      tags: [properties]
+      summary: Get seller's own properties
+      responses:
+        "200":
+          description: Seller's properties
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PropertyItem"
+
+  /recommendations:
+    get:
+      operationId: getRecommendations
+      tags: [recommendations]
+      summary: Get personalized property recommendations
+      responses:
+        "200":
+          description: Recommended properties
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RecommendedProperty"
+
+  /track:
+    post:
+      operationId: trackInteraction
+      tags: [interactions]
+      summary: Track user interaction with property
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrackInteractionBody"
+      responses:
+        "201":
+          description: Interaction tracked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /track/page-view:
+    post:
+      operationId: trackPageView
+      tags: [interactions]
+      summary: Track SPA page visit (optional auth for user attribution)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrackPageViewBody"
+      responses:
+        "201":
+          description: Page view recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /chat:
+    post:
+      operationId: sendChatMessage
+      tags: [chat]
+      summary: Send message to AI chatbot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatMessageBody"
+      responses:
+        "200":
+          description: Bot response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+
+  /admin/users:
+    get:
+      operationId: adminListUsers
+      tags: [admin]
+      summary: List all users (admin)
+      responses:
+        "200":
+          description: Users list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserProfile"
+
+  /admin/properties:
+    get:
+      operationId: adminListProperties
+      tags: [admin]
+      summary: List all properties including pending (admin)
+      responses:
+        "200":
+          description: All properties
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PropertyItem"
+
+  /admin/properties/{id}/approve:
+    patch:
+      operationId: adminApproveProperty
+      tags: [admin]
+      summary: Approve a property
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Property approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PropertyItem"
+
+  /admin/properties/{id}/reject:
+    patch:
+      operationId: adminRejectProperty
+      tags: [admin]
+      summary: Reject a property
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Property rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PropertyItem"
+
+  /admin/feedbacks:
+    get:
+      operationId: adminListFeedbacks
+      tags: [admin]
+      summary: List all feedback/complaints
+      responses:
+        "200":
+          description: Feedbacks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FeedbackItem"
+
+  /admin/feedback:
+    post:
+      operationId: createFeedback
+      tags: [admin]
+      summary: Create feedback (auto from chatbot)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFeedbackBody"
+      responses:
+        "201":
+          description: Feedback created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackItem"
+
+  /admin/feedbacks/{id}/resolve:
+    patch:
+      operationId: adminResolveFeedback
+      tags: [admin]
+      summary: Mark feedback as resolved
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Feedback resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackItem"
+
+  /admin/analytics:
+    get:
+      operationId: adminGetAnalytics
+      tags: [admin]
+      summary: Get system analytics
+      responses:
+        "200":
+          description: Analytics data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsData"
+
+  /user/preferences:
+    get:
+      operationId: getUserPreferences
+      tags: [auth]
+      summary: Get user preferences
+      responses:
+        "200":
+          description: User preferences
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreferencesData"
+    put:
+      operationId: updateUserPreferences
+      tags: [auth]
+      summary: Update user preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePreferencesBody"
+      responses:
+        "200":
+          description: Preferences updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreferencesData"
+
+  /user/saved:
+    get:
+      operationId: getSavedProperties
+      tags: [properties]
+      summary: Get user's saved/favorited properties
+      responses:
+        "200":
+          description: Saved properties
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PropertyItem"
+
+  /user/delete:
+    delete:
+      operationId: deleteAccount
+      tags: [auth]
+      summary: Delete user account and data
+      responses:
+        "204":
+          description: Account deleted
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+
+    SuccessResponse:
+      type: object
+      properties:
+        message:
+          type: string
+      required:
+        - message
+
+    RegisterBody:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 6
+        phone:
+          type: string
+        role:
+          type: string
+          enum: [buyer, seller]
+      required:
+        - name
+        - email
+        - password
+        - role
+
+    LoginBody:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+      required:
+        - email
+        - password
+
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        user:
+          $ref: "#/components/schemas/UserProfile"
+      required:
+        - token
+        - user
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: ["string", "null"]
+        role:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - email
+        - role
+        - createdAt
+
+    PropertyItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+        location:
+          type: string
+        area:
+          type: number
+        rooms:
+          type: ["integer", "null"]
+        propertyType:
+          type: string
+        features:
+          type: array
+          items:
+            type: string
+        imageUrl:
+          type: ["string", "null"]
+        imageUrls:
+          type: array
+          items:
+            type: string
+        sellerId:
+          type: integer
+        status:
+          type: string
+        views:
+          type: integer
+        saves:
+          type: integer
+        contacts:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - title
+        - description
+        - price
+        - location
+        - area
+        - propertyType
+        - features
+        - sellerId
+        - status
+        - views
+        - saves
+        - contacts
+        - createdAt
+
+    CreatePropertyBody:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+        location:
+          type: string
+        area:
+          type: number
+        rooms:
+          type: integer
+        propertyType:
+          type: string
+          enum: [apartment, villa, commercial, land]
+        features:
+          type: array
+          items:
+            type: string
+        imageUrl:
+          type: string
+        imageUrls:
+          type: array
+          items:
+            type: string
+          maxItems: 3
+      required:
+        - title
+        - description
+        - price
+        - location
+        - area
+        - propertyType
+
+    UpdatePropertyBody:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+        location:
+          type: string
+        area:
+          type: number
+        rooms:
+          type: integer
+        propertyType:
+          type: string
+        features:
+          type: array
+          items:
+            type: string
+        imageUrl:
+          type: string
+        imageUrls:
+          type: array
+          items:
+            type: string
+          maxItems: 3
+
+    RecommendedProperty:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+        location:
+          type: string
+        area:
+          type: number
+        rooms:
+          type: ["integer", "null"]
+        propertyType:
+          type: string
+        features:
+          type: array
+          items:
+            type: string
+        imageUrl:
+          type: ["string", "null"]
+        sellerId:
+          type: integer
+        status:
+          type: string
+        views:
+          type: integer
+        saves:
+          type: integer
+        contacts:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        matchScore:
+          type: number
+        matchReasons:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - title
+        - description
+        - price
+        - location
+        - area
+        - propertyType
+        - features
+        - sellerId
+        - status
+        - views
+        - saves
+        - contacts
+        - createdAt
+        - matchScore
+        - matchReasons
+
+    TrackInteractionBody:
+      type: object
+      properties:
+        propertyId:
+          type: integer
+        interactionType:
+          type: string
+          enum: [view, save, unsave, contact, scroll, time_spent]
+        seconds:
+          type: number
+      required:
+        - propertyId
+        - interactionType
+
+    ChatMessageBody:
+      type: object
+      properties:
+        message:
+          type: string
+        conversationHistory:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatHistoryItem"
+      required:
+        - message
+
+    ChatHistoryItem:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+      required:
+        - role
+        - content
+
+    ChatMatchedProperty:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        price:
+          type: number
+        location:
+          type: string
+        propertyType:
+          type: string
+        propertyUrl:
+          type: string
+          description: Relative frontend URL for property details
+        matchReasons:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - title
+        - price
+        - location
+        - propertyType
+        - propertyUrl
+        - matchReasons
+
+    ChatResponse:
+      type: object
+      properties:
+        reply:
+          type: string
+        properties:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMatchedProperty"
+        feedbackCreated:
+          type: boolean
+      required:
+        - reply
+
+    FeedbackItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        userId:
+          type: ["integer", "null"]
+        message:
+          type: string
+        criteria:
+          type: ["string", "null"]
+        resolved:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - message
+        - resolved
+        - createdAt
+
+    CreateFeedbackBody:
+      type: object
+      properties:
+        message:
+          type: string
+        criteria:
+          type: string
+      required:
+        - message
+
+    TrackPageViewBody:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Client route path starting with /
+      required:
+        - path
+
+    PagePathCount:
+      type: object
+      properties:
+        path:
+          type: string
+        count:
+          type: integer
+      required:
+        - path
+        - count
+
+    PropertyLeaderItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        views:
+          type: integer
+        saves:
+          type: integer
+        contacts:
+          type: integer
+        sellerId:
+          type: integer
+      required:
+        - id
+        - title
+        - views
+        - saves
+        - contacts
+        - sellerId
+
+    UserActivityItem:
+      type: object
+      properties:
+        userId:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        interactionCount:
+          type: integer
+        pageViewCount:
+          type: integer
+      required:
+        - userId
+        - name
+        - email
+        - interactionCount
+        - pageViewCount
+
+    SellerActivityEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+        propertyId:
+          type: integer
+        propertyTitle:
+          type: string
+        interactionType:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - propertyId
+        - propertyTitle
+        - interactionType
+        - createdAt
+
+    SellerActivityResponse:
+      type: object
+      properties:
+        recentInteractions:
+          type: array
+          items:
+            $ref: "#/components/schemas/SellerActivityEvent"
+      required:
+        - recentInteractions
+
+    AnalyticsData:
+      type: object
+      properties:
+        totalUsers:
+          type: integer
+        totalProperties:
+          type: integer
+        totalInteractions:
+          type: integer
+        pendingProperties:
+          type: integer
+        unresolvedFeedbacks:
+          type: integer
+        totalPageViews:
+          type: integer
+        interactionsByType:
+          type: object
+          additionalProperties:
+            type: integer
+        pageViewsByPath:
+          type: array
+          items:
+            $ref: "#/components/schemas/PagePathCount"
+        topPropertiesByViews:
+          type: array
+          items:
+            $ref: "#/components/schemas/PropertyLeaderItem"
+        userActivity:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserActivityItem"
+      required:
+        - totalUsers
+        - totalProperties
+        - totalInteractions
+        - pendingProperties
+        - unresolvedFeedbacks
+        - totalPageViews
+        - interactionsByType
+        - pageViewsByPath
+        - topPropertiesByViews
+        - userActivity
+
+    UserPreferencesData:
+      type: object
+      properties:
+        preferredLocation:
+          type: ["string", "null"]
+        maxBudget:
+          type: ["number", "null"]
+        preferredType:
+          type: ["string", "null"]
+        preferredFeatures:
+          type: array
+          items:
+            type: string
+      required:
+        - preferredFeatures
+
+    UpdatePreferencesBody:
+      type: object
+      properties:
+        preferredLocation:
+          type: string
+        maxBudget:
+          type: number
+        preferredType:
+          type: string
+        preferredFeatures:
+          type: array
+          items:
+            type: string
