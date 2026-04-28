@@ -12,16 +12,39 @@ import {
   InteractionModel,
   PropertyModel,
   UserPreferenceModel,
+  BehaviorProfileModel,
+  ConversationStateModel,
   toDateISOString,
 } from "../lib/mongo";
 
 const router: IRouter = Router();
 
+function normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .trim();
+}
+
+function similarity(a: string[], b: string[]): number {
+  const A = new Set(a.map(normalize));
+  const B = new Set(b.map(normalize));
+  const inter = [...A].filter((x) => B.has(x)).length;
+  const union = new Set([...A, ...B]).size;
+  return union === 0 ? 0 : inter / union;
+}
+
 router.get("/recommendations", authMiddleware, async (req, res): Promise<void> => {
   await ensureMongoConnection();
   const userId = req.user!.userId;
 
-  const prefs = await UserPreferenceModel.findOne({ userId }).lean();
+  const [prefs, behaviorProfile, latestConversation] = await Promise.all([
+    UserPreferenceModel.findOne({ userId }).lean(),
+    BehaviorProfileModel.findOne({ userId }).lean(),
+    ConversationStateModel.findOne({ userId }).sort({ updatedAt: -1 }).lean(),
+  ]);
 
   const properties = await PropertyModel.find({ status: "approved" }).lean();
 
@@ -43,12 +66,36 @@ router.get("/recommendations", authMiddleware, async (req, res): Promise<void> =
 
   const maxBehavior = Math.max(...Object.values(behaviorScores), 1);
 
-  const userVector = prefs
+  const mergedPreferences = {
+    maxBudget:
+      prefs?.maxBudget ??
+      behaviorProfile?.maxBudget ??
+      latestConversation?.slots?.budget ??
+      null,
+    preferredLocation:
+      prefs?.preferredLocation ??
+      behaviorProfile?.preferredLocation ??
+      latestConversation?.slots?.location ??
+      null,
+    preferredType:
+      prefs?.preferredType ??
+      behaviorProfile?.preferredType ??
+      latestConversation?.slots?.propertyType ??
+      null,
+    preferredFeatures:
+      prefs?.preferredFeatures?.length
+        ? prefs.preferredFeatures
+        : behaviorProfile?.preferredFeatures?.length
+          ? behaviorProfile.preferredFeatures
+          : latestConversation?.slots?.features ?? [],
+  };
+
+  const userVector = mergedPreferences
     ? buildUserVector(
-        prefs.maxBudget ?? null,
-        prefs.preferredLocation ?? null,
-        prefs.preferredType ?? null,
-        prefs.preferredFeatures ?? [],
+        mergedPreferences.maxBudget,
+        mergedPreferences.preferredLocation,
+        mergedPreferences.preferredType,
+        mergedPreferences.preferredFeatures,
       )
     : buildUserVector(null, null, null, []);
 
@@ -62,19 +109,35 @@ router.get("/recommendations", authMiddleware, async (req, res): Promise<void> =
 
     const contentScore = cosineSimilarity(userVector, propertyVector);
     const normalizedBehavior = (behaviorScores[property.id] || 0) / maxBehavior;
-    const finalScore = contentScore * 0.6 + normalizedBehavior * 0.4;
+    const locationBoost =
+      mergedPreferences.preferredLocation &&
+      normalize(property.location).includes(normalize(mergedPreferences.preferredLocation))
+        ? 0.2
+        : 0;
+    const typeBoost =
+      mergedPreferences.preferredType && property.propertyType === mergedPreferences.preferredType
+        ? 0.2
+        : 0;
+    const featureBoost = similarity(property.features, mergedPreferences.preferredFeatures) * 0.2;
+    const profileBoost =
+      behaviorProfile?.boostedPropertyIds?.includes(property.id) ? 0.75 : 0;
 
-    const matchReasons = prefs
-      ? getMatchReasons(
-          { price: property.price, location: property.location, propertyType: property.propertyType, features: property.features },
-          {
-            maxBudget: prefs.maxBudget ?? null,
-            preferredLocation: prefs.preferredLocation ?? null,
-            preferredType: prefs.preferredType ?? null,
-            preferredFeatures: prefs.preferredFeatures ?? [],
-          },
-        )
-      : ["مقترح لك"];
+    const finalScore =
+      contentScore * 0.45 +
+      normalizedBehavior * 0.25 +
+      locationBoost +
+      typeBoost +
+      featureBoost +
+      profileBoost;
+
+    const matchReasons = getMatchReasons(
+      { price: property.price, location: property.location, propertyType: property.propertyType, features: property.features },
+      mergedPreferences,
+    );
+
+    if (profileBoost > 0) {
+      matchReasons.push("مدعوم من سلوكك السابق");
+    }
 
     return {
       id: property.id,
