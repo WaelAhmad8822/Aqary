@@ -5,7 +5,7 @@ import "./index.css";
 
 // In local dev the frontend runs on :5173 while API runs on :5001 (see api-server .env PORT).
 if (import.meta.env.DEV) {
-  setBaseUrl(import.meta.env.VITE_API_BASE_URL || "workspaceapi-server-production-6b84.up.railway.app/");
+  setBaseUrl(import.meta.env.VITE_API_BASE_URL || "https://workspaceapi-server-production-6b84.up.railway.app");
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
