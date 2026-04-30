@@ -101,6 +101,10 @@ interface SearchResult {
   score: number;
   explanation: string;
   matchReasons: string[];
+  thumbnail?: string | null;
+  pricePerSqm?: number | null;
+  daysOnMarket?: number | null;
+  confidence?: number; // normalized 0..1
 }
 
 interface ConversationStateDoc {
@@ -450,6 +454,22 @@ ${property.title} - ${property.location} - ${property.price}
   ]);
 }
 
+// Fast deterministic template fallback to avoid LLM calls for every result
+function generateExplanationTemplate(property: IProperty, reasons: string[]): string {
+  if (!reasons || reasons.length === 0) {
+    return `متوافق مع معايير البحث: ${property.propertyType || "نوع غير محدد"}, ${property.location || "موقع غير محدد"}.`;
+  }
+  const map: Record<string, string> = {
+    "متوافق مع المعنى المطلوب": "مطابق لوصفك",
+    "قريب من الميزانية": "سعر مناسب",
+    "في الموقع المفضل": "في منطقتك المفضلة",
+    "بنفس نوع العقار": "نفس نوع العقار",
+    "يحتوي بعض المميزات المطلوبة": "يحتوي بعض المميزات",
+  };
+  const short = reasons.map((r) => map[r] ?? r).slice(0, 3).join("، ");
+  return `${short} — ${property.title}، ${property.location}، السعر ${property.price}`;
+}
+
 /* ================== Hybrid Search ================== */
 
 async function runHybridSearch(slots: ConversationSlots, userId: number): Promise<SearchResult[]> {
@@ -581,7 +601,11 @@ async function runHybridSearch(slots: ConversationSlots, userId: number): Promis
       if (typeScore > 0) reasons.push("بنفس نوع العقار");
       if (featureScore >= 0.2) reasons.push("يحتوي بعض المميزات المطلوبة");
 
-      const explanation = await generateExplanation(p, reasons);
+      // Use a fast template explanation initially to avoid LLM calls on every candidate
+      const templateExplanation = generateExplanationTemplate(p, reasons);
+
+      const daysOnMarket = p.createdAt ? Math.floor((Date.now() - new Date(p.createdAt).getTime()) / (1000 * 60 * 60 * 24)) : null;
+      const pricePerSqm = p.area ? Math.round(p.price / p.area) : null;
 
       return {
         id: p.id,
@@ -591,18 +615,51 @@ async function runHybridSearch(slots: ConversationSlots, userId: number): Promis
         propertyType: p.propertyType,
         propertyUrl: `/property/${p.id}`,
         score: finalScore,
-        explanation,
+        explanation: templateExplanation,
         matchReasons: reasons,
-      } satisfies SearchResult;
+        thumbnail: p.imageUrl || (p.imageUrls && p.imageUrls[0]) || null,
+        pricePerSqm,
+        daysOnMarket,
+        confidence: Math.max(0, Math.min(1, finalScore)),
+      } as SearchResult;
     }),
   );
 
+  // sort and take top results
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     return a.price - b.price;
   });
 
-  return scored.slice(0, MAX_RESULTS);
+  const top = scored.slice(0, MAX_RESULTS);
+
+  // Enrich top-K explanations with LLM (async but awaited here for simplicity); you can move to background worker
+  const TOP_K_LLM = 3;
+  const toEnrich = top.slice(0, TOP_K_LLM);
+  await Promise.all(
+    toEnrich.map(async (item) => {
+      try {
+        const property = await PropertyModel.findOne({ id: item.id }).lean<IProperty | null>();
+        if (!property) return;
+        // If cached explanation exists, use it
+        const cached = (property as any).explanationCached;
+        if (cached) {
+          item.explanation = cached;
+          return;
+        }
+        const llmExp = await generateExplanation(property, item.matchReasons);
+        if (llmExp) {
+          item.explanation = llmExp;
+          // store cached explanation (fire-and-forget)
+          PropertyModel.updateOne({ id: item.id }, { $set: { explanationCached: llmExp } }).catch(() => {});
+        }
+      } catch (err) {
+        // ignore and keep template
+      }
+    }),
+  );
+
+  return top.slice(0, MAX_RESULTS);
 }
 
 /* ================== Route ================== */
@@ -690,7 +747,7 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
     } else if (currentStep === "ask_payment") {
       reply = "كيف تفضل الدفع؟ نقداً (كاش) أم تمويلاً (تقسيط)؟";
     } else if (currentStep === "handle_installment") {
-      reply = "حالياً خدمة التقسيط والتمويل العقاري غير متاحة مباشرة في النظام. هل تود الاستمرار بخيار الدفع كاش؟";
+      reply = "حالياً خدمة التقسيط والتمويل العقاري غير متاحة مباشرة في النظام. هل تود الاستمرار بخيار الدفع كاش؟[...]";
     } else if (currentStep === "ask_budget") {
       reply = "ما هي الميزانية المتاحة لديك؟";
     } else if (currentStep === "ask_location") {
@@ -700,9 +757,14 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
     } else if (currentStep === "ask_specs") {
       reply = "ما هي المواصفات أو المتطلبات الأساسية التي تهمك؟";
     } else if (currentStep === "show_results") {
-      reply = matchedProperties.length
-        ? "وجدت لك أفضل الخيارات المناسبة، وسأعرضها لك الآن."
-        : "لم أجد نتائج مناسبة، هل تريد تعديل الميزانية أو الموقع؟";
+      if (matchedProperties.length) {
+        // Build a concise summary of top 3 for user
+        const top3 = matchedProperties.slice(0, 3);
+        const brief = top3.map((p, i) => `${i + 1}) ${p.title} — ${p.price}، ${p.location}`).join("; ");
+        reply = `وجدت لك أفضل الخيارات المناسبة (${matchedProperties.length}). أفضل 3: ${brief}. هل تريد عرض التفاصيل أو تعديل الفلاتر؟`;
+      } else {
+        reply = "لم أجد نتائج مناسبة، هل تريد تعديل الميزانية أو الموقع؟";
+      }
 
     // Seller-specific replies
     } else if (currentStep === "ask_property_location") {
@@ -749,10 +811,12 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
       properties?: SearchResult[];
       feedbackCreated?: boolean;
       currentStep?: string;
+      totalMatches?: number;
     } = { reply, currentStep };
 
     if (matchedProperties.length > 0) {
       response.properties = matchedProperties;
+      response.totalMatches = matchedProperties.length;
     }
 
     res.json(response);
@@ -761,6 +825,47 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
     res.status(500).json({
       reply: "حدث خطأ في السيرفر",
     });
+  }
+});
+
+// New route: ask the model questions about a specific property result
+router.post("/chat/property-query", authMiddleware, async (req, res): Promise<void> => {
+  try {
+    await ensureMongoConnection();
+    const body = req.body as { propertyId?: number; question?: string; conversationHistory?: unknown };
+    if (!body || typeof body.propertyId !== "number" || !body.question) {
+      res.status(400).json({ error: "propertyId and question are required" });
+      return;
+    }
+
+    const userId = req.user!.userId;
+    const property = await PropertyModel.findOne({ id: body.propertyId }).lean<IProperty | null>();
+    if (!property) {
+      res.status(404).json({ error: "Property not found" });
+      return;
+    }
+
+    // Build a focused system prompt containing the property details and instructions to answer based only on that data
+    const propertyText = `العقار:\nعنوان: ${property.title}\nالموقع: ${property.location}\nالسعر: ${property.price}\nالمساحة: ${property.area || "غير متوفر"}\nالنوع: ${property.propertyType}\nالمميزات: ${(property.features || []).join(", ")}\nالوصف: ${property.description || ""}`;
+
+    const systemPrompt = `أنت مساعد عقاري. أجب فقط استناداً إلى بيانات العقار التالية وأجب بإيجاز. إذا سأل المستخدم شيئاً غير موجود في بيانات العقار فاعترف بذلك واطلب توضيحاً أو اعرض معلومات عامة.
+
+${propertyText}
+`;
+
+    const chatHistory = asChatHistory(body.conversationHistory);
+    // include recent user messages for context but keep focus on property data
+    const messages = [{ role: "system", content: systemPrompt }, ...chatHistory, { role: "user", content: body.question }];
+
+    const answer = await callLLM(messages as any);
+
+    // record a view-like interaction
+    recordInteraction({ userId, propertyId: property.id, interactionType: "view" }).catch(() => {});
+
+    res.json({ answer });
+  } catch (err) {
+    logger.error({ err }, "property-query failed");
+    res.status(500).json({ error: "server error" });
   }
 });
 
