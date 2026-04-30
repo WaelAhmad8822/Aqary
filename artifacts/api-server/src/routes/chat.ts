@@ -239,6 +239,18 @@ function userAgreesToCash(message: string): boolean {
 
 function computeStep(slots: ConversationSlots): string {
   if (!slots.role) return "ask_role";
+
+  // Simple seller flow: ask seller-relevant info instead of buyer payment flow
+  if (slots.role === "seller") {
+    if (!slots.location) return "ask_property_location";
+    if (!slots.propertyType) return "ask_property_type";
+    if (!slots.features.length) return "ask_specs";
+    // for sellers we interpret budget as listing price
+    if (!slots.budget) return "ask_listing_price";
+    return "seller_ready";
+  }
+
+  // buyer flow (existing)
   if (!slots.payment) return "ask_payment";
   if (slots.payment === "installment") return "handle_installment";
   if (!slots.budget) return "ask_budget";
@@ -691,6 +703,14 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
       reply = matchedProperties.length
         ? "وجدت لك أفضل الخيارات المناسبة، وسأعرضها لك الآن."
         : "لم أجد نتائج مناسبة، هل تريد تعديل الميزانية أو الموقع؟";
+
+    // Seller-specific replies
+    } else if (currentStep === "ask_property_location") {
+      reply = "أين يقع العقار الذي تريد بيعه؟";
+    } else if (currentStep === "ask_listing_price") {
+      reply = "ما هو السعر المطلوب لبيع العقار؟";
+    } else if (currentStep === "seller_ready") {
+      reply = "شكراً! لقد استلمنا معلومات العقار. هل ترغب في نشر الإعلان الآن أم حفظه كمسودة؟";
     } else {
       reply = "من فضلك كمل البيانات.";
     }
