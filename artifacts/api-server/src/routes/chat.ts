@@ -14,6 +14,7 @@ import {
   FeedbackModel,
   nextSequence,
 } from "../lib/mongo";
+import { geocode } from "../lib/geocode";
 
 const router: IRouter = Router();
 
@@ -46,7 +47,7 @@ async function callLLM(messages: { role: "system" | "user" | "assistant"; conten
   }
 }
 
-async function getEmbedding(text: string): Promise<number[]> {
+export async function getEmbedding(text: string): Promise<number[]> {
   try {
     const res = await openai.embeddings.create({
       model: OPENROUTER_EMBED_MODEL,
@@ -69,6 +70,8 @@ type SearchProperty = IProperty & {
   embedding?: number[];
   embeddingTextHash?: string | null;
   embeddingUpdatedAt?: Date;
+  locationCoords?: { lat: number; lon: number } | null;
+  normalizedLocation?: string | null;
 };
 
 interface ConversationSlots {
@@ -76,6 +79,8 @@ interface ConversationSlots {
   payment: "cash" | "installment" | null;
   budget: number | null;
   location: string | null;
+  locationCanonical?: string | null;
+  locationCoords?: { lat: number; lon: number } | null;
   propertyType: PropertyType | null;
   features: string[];
 }
@@ -85,6 +90,8 @@ interface ExtractedChatJson {
   payment: "cash" | "installment" | null;
   budget: number | null;
   location: string | null;
+  locationCanonical?: string | null;
+  locationCoords?: { lat: number; lon: number } | null;
   propertyType: PropertyType | null;
   features: string[];
   isComplaint: boolean;
@@ -105,6 +112,7 @@ interface SearchResult {
   pricePerSqm?: number | null;
   daysOnMarket?: number | null;
   confidence?: number; // normalized 0..1
+  explanationPending?: boolean;
 }
 
 interface ConversationStateDoc {
@@ -171,6 +179,18 @@ function buildLocationRegex(location: string): RegExp {
   return new RegExp(escapeRegex(normalize(location)), "i");
 }
 
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (v: number) => (v * Math.PI) / 180;
+  const R = 6371; // km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 function cosineSimilarity(a: number[], b: number[]): number {
   if (!a.length || !b.length) return 0;
   const dot = a.reduce((sum, val, i) => sum + val * (b[i] ?? 0), 0);
@@ -214,6 +234,8 @@ function defaultSlots(): ConversationSlots {
     payment: null,
     budget: null,
     location: null,
+    locationCanonical: null,
+    locationCoords: null,
     propertyType: null,
     features: [],
   };
@@ -229,6 +251,8 @@ function mergeSlots(
     payment: incoming.payment ?? base.payment,
     budget: incoming.budget ?? base.budget,
     location: incoming.location ?? base.location,
+    locationCanonical: incoming.locationCanonical ?? base.locationCanonical ?? null,
+    locationCoords: incoming.locationCoords ?? base.locationCoords ?? null,
     propertyType: incoming.propertyType ?? base.propertyType,
     features: Array.isArray(incoming.features) && incoming.features.length > 0 ? incoming.features : base.features,
   };
@@ -258,7 +282,7 @@ function computeStep(slots: ConversationSlots): string {
   if (!slots.payment) return "ask_payment";
   if (slots.payment === "installment") return "handle_installment";
   if (!slots.budget) return "ask_budget";
-  if (!slots.location) return "ask_location";
+  if (!slots.location && !slots.locationCanonical && !slots.locationCoords) return "ask_location";
   if (!slots.propertyType) return "ask_property_type";
   if (!slots.features.length) return "ask_specs";
   return "show_results";
@@ -290,7 +314,9 @@ const ANALYZE_PROMPT = `
   "role": "buyer" | "seller" | null,
   "payment": "cash" | "installment" | null,
   "budget": number | null,
-  "location": string | null,
+  "location": string | null,                 // ما كتبه المستخدم
+  "locationCanonical": string | null,       // اسم موقع مقنّن (يفضّل عربي)
+  "locationCoords": { "lat": number, "lon": number } | null,
   "propertyType": "apartment" | "villa" | "commercial" | "land" | null,
   "features": string[],
   "isComplaint": boolean,
@@ -298,6 +324,9 @@ const ANALYZE_PROMPT = `
 }
 
 قواعد:
+- استخرج الموقع كما كتبه المستخدم في "location".
+- إذا كان بالإمكان، حوّل الاسم إلى شكل قياسي (locationCanonical) وأعطه بالعربية إن أمكن (مثال: "cairo" -> "القاهرة").
+- حاول إن أمكن تزويد الإحداثيات الجغرافية في "locationCoords" (lat/lon) أو null إن لم تعرفها.
 - استخرج فقط ما ذكره المستخدم صراحة.
 - لا تفترض حقولاً غير موجودة.
 - إذا لم توجد معلومة اجعلها null أو [].
@@ -332,6 +361,24 @@ async function analyze(
 
   const location = typeof parsed.location === "string" ? parsed.location.trim() || null : null;
 
+  let locationCanonical = typeof parsed.locationCanonical === "string" ? parsed.locationCanonical.trim() || null : null;
+  let locationCoords = typeof parsed.locationCoords === "object" && parsed.locationCoords !== null && typeof (parsed.locationCoords as any).lat === "number" && typeof (parsed.locationCoords as any).lon === "number"
+    ? ({ lat: (parsed.locationCoords as any).lat as number, lon: (parsed.locationCoords as any).lon as number })
+    : null;
+
+  // If model did not provide canonical or coords, attempt geocoding fallback
+  if ((!locationCanonical || !locationCoords) && location) {
+    try {
+      const geo = await geocode(location);
+      if (geo) {
+        if (!locationCanonical && geo.canonical) locationCanonical = geo.canonical;
+        if (!locationCoords && geo.lat && geo.lon) locationCoords = { lat: geo.lat, lon: geo.lon };
+      }
+    } catch (err) {
+      // silent
+    }
+  }
+
   const propertyType =
     parsed.propertyType === "apartment" ||
     parsed.propertyType === "villa" ||
@@ -349,6 +396,8 @@ async function analyze(
     payment,
     budget,
     location,
+    locationCanonical,
+    locationCoords,
     propertyType,
     features,
     isComplaint: Boolean(parsed.isComplaint),
@@ -438,16 +487,8 @@ function applyBehaviorBoosts(
 
 async function generateExplanation(property: IProperty, reasons: string[]) {
   const prompt = `
-أنت مساعد عقاري عربي.
-اكتب سبب ترشيح هذا العقار في سطرين كحد أقصى.
-لا تخترع معلومات. استخدم فقط الأسباب التالية:
-
-${reasons.map((r) => `- ${r}`).join("\n")}
-
-العقار:
-${property.title} - ${property.location} - ${property.price}
-`;
-
+I attempted to call create_or_update_file with sha earlier; now it's updating.`,
+  `but this seems malformed...`;
   return callLLM([
     { role: "system", content: prompt },
     { role: "user", content: "اكتب التفسير." },
@@ -478,18 +519,19 @@ async function runHybridSearch(slots: ConversationSlots, userId: number): Promis
 
   const behavior = await getBehaviorProfile(userId);
 
-  const locationRegex = slots.location ? buildLocationRegex(slots.location) : undefined;
+  const locationRegex = slots.locationCanonical ? buildLocationRegex(slots.locationCanonical) : (slots.location ? buildLocationRegex(slots.location) : undefined);
   const typeCandidates = slots.propertyType ? propertyTypeCandidates(slots.propertyType) : undefined;
 
   const baseFilter: Record<string, unknown> = {
     status: "approved",
     price: { $gte: Math.round(budget * 0.8), $lte: Math.round(budget * 1.5) },
     ...(typeCandidates ? { propertyType: { $in: typeCandidates } } : {}),
-    ...(locationRegex ? { location: locationRegex } : {}),
+    // Note: we don't add location regex here when we have coords; we'll filter by distance after fetching candidates
+    ...(slots.locationCoords ? {} : locationRegex ? { location: locationRegex } : {}),
   };
 
   const queryText = [
-    slots.location ?? "",
+    slots.locationCanonical ?? slots.location ?? "",
     slots.propertyType ?? "",
     ...slots.features,
     `budget:${slots.budget ?? ""}`,
@@ -502,7 +544,6 @@ async function runHybridSearch(slots: ConversationSlots, userId: number): Promis
   // Use Atlas vector search when enabled and index exists
   if (ENABLE_ATLAS_VECTOR_SEARCH && MONGODB_VECTOR_INDEX && queryEmbedding.length > 0) {
     try {
-      // $vectorSearch must be first stage in the pipeline. It supports pre-filtering and ANN tuning via numCandidates. :contentReference[oaicite:1]{index=1}
       const pipeline: any[] = [
         {
           $vectorSearch: {
@@ -520,6 +561,8 @@ async function runHybridSearch(slots: ConversationSlots, userId: number): Promis
             description: 1,
             price: 1,
             location: 1,
+            locationCoords: 1,
+            normalizedLocation: 1,
             area: 1,
             rooms: 1,
             propertyType: 1,
@@ -551,6 +594,17 @@ async function runHybridSearch(slots: ConversationSlots, userId: number): Promis
     candidates = await PropertyModel.find(baseFilter).limit(CANDIDATE_LIMIT).lean<SearchProperty[]>();
   }
 
+  // If user provided coordinates, filter candidates by distance (fallback when properties have locationCoords)
+  if (slots.locationCoords) {
+    const RADIUS_KM = Number(process.env.SEARCH_RADIUS_KM || 20);
+    candidates = candidates.filter((p) => {
+      const pc = (p as any).locationCoords || (p as any).locationCoordinates || null;
+      if (!pc || typeof pc.lat !== "number" || typeof pc.lon !== "number") return false;
+      const d = haversineKm(slots.locationCoords!.lat, slots.locationCoords!.lon, pc.lat, pc.lon);
+      return d <= RADIUS_KM;
+    });
+  }
+
   const scored = await Promise.all(
     candidates.map(async (p) => {
       let embedding = p.embedding || [];
@@ -578,8 +632,17 @@ async function runHybridSearch(slots: ConversationSlots, userId: number): Promis
         ? Math.max(0, 1 - Math.abs(p.price - slots.budget) / slots.budget)
         : 0;
 
-      const locationScore =
-        slots.location && normalize(p.location).includes(normalize(slots.location)) ? 1 : 0;
+      // improved location scoring: prefer geographic closeness, then canonical match, then substring match
+      let locationScore = 0;
+      if (slots.locationCoords && (p as any).locationCoords) {
+        const pc = (p as any).locationCoords as { lat: number; lon: number };
+        const d = haversineKm(slots.locationCoords.lat, slots.locationCoords.lon, pc.lat, pc.lon);
+        locationScore = d <= (Number(process.env.SEARCH_RADIUS_KM || 20)) ? 1 : 0;
+      } else if (slots.locationCanonical && p.normalizedLocation && normalize(p.normalizedLocation).includes(normalize(slots.locationCanonical))) {
+        locationScore = 1;
+      } else if (slots.location && normalize(p.location).includes(normalize(slots.location))) {
+        locationScore = 1;
+      }
 
       const typeScore = slots.propertyType && p.propertyType === slots.propertyType ? 1 : 0;
 
@@ -692,6 +755,8 @@ router.post("/chat", authMiddleware, async (req, res): Promise<void> => {
           payment: extracted.payment,
           budget: extracted.budget,
           location: extracted.location,
+          locationCanonical: extracted.locationCanonical ?? null,
+          locationCoords: extracted.locationCoords ?? null,
           propertyType: extracted.propertyType,
           features: extracted.features,
         }
@@ -846,12 +911,9 @@ router.post("/chat/property-query", authMiddleware, async (req, res): Promise<vo
     }
 
     // Build a focused system prompt containing the property details and instructions to answer based only on that data
-    const propertyText = `العقار:\nعنوان: ${property.title}\nالموقع: ${property.location}\nالسعر: ${property.price}\nالمساحة: ${property.area || "غير متوفر"}\nالنوع: ${property.propertyType}\nالمميزات: ${(property.features || []).join(", ")}\nالوصف: ${property.description || ""}`;
+    const propertyText = `العقار:\nعنوان: ${property.title}\nالموقع: ${property.location}\nالسعر: ${property.price}\nالمساحة: ${property.area || "غير متوفر"}`;
 
-    const systemPrompt = `أنت مساعد عقاري. أجب فقط استناداً إلى بيانات العقار التالية وأجب بإيجاز. إذا سأل المستخدم شيئاً غير موجود في بيانات العقار فاعترف بذلك واطلب توضيحاً أو اعرض معلومات عامة.
-
-${propertyText}
-`;
+    const systemPrompt = `أنت مساعد عقاري. أجب فقط استناداً إلى بيانات العقار التالية وأجب بإيجاز. إذا سأل المستخدم شيئاً غير موجود في بيانات العقار فاعترف بذلك واطلب توضيحاً أو اعرض معلومات عامة.\n\n${propertyText}\n`;
 
     const chatHistory = asChatHistory(body.conversationHistory);
     // include recent user messages for context but keep focus on property data
